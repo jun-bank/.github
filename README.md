@@ -237,13 +237,13 @@ Client → Gateway → JWT 검증 → 헤더 주입 → 내부 서비스
 
 ```java
 public record IntegrationEvent(
-    String eventId,           // 멱등성 보장
-    String eventType,         // 이벤트 타입
-    int sequenceNumber,       // 순서 보장
-    LocalDateTime timestamp,  // 발생 시각
-    LocalDateTime expiresAt,  // TTL
-    int retryCount,           // 재시도 횟수
-    Object payload            // 실제 데이터
+        String eventId,           // 멱등성 보장
+        String eventType,         // 이벤트 타입
+        int sequenceNumber,       // 순서 보장
+        LocalDateTime timestamp,  // 발생 시각
+        LocalDateTime expiresAt,  // TTL
+        int retryCount,           // 재시도 횟수
+        Object payload            // 실제 데이터
 ) {}
 ```
 
@@ -297,16 +297,242 @@ cd account-service && ./gradlew bootRun &
     - BaseEntity (Soft Delete), JPA Auditing
     - 헤더 기반 인증 필터
     - 로깅 AOP
+- [x] **비즈니스 서비스 Domain 레이어 (66개 파일)**
+    - 7개 서비스 전체 도메인 모델 구현 완료
+    - Exception, Enum, VO, Aggregate Root 포함
+    - 각 서비스별 핵심 학습 주제 반영
 
 ### 🔜 예정
 
 - [ ] Auth Server JWT 구현
 - [ ] Gateway JWT 검증 필터
-- [ ] 각 서비스 도메인 로직 구현
+- [ ] Application Layer (UseCase, Port, Service)
+- [ ] Infrastructure Layer (Entity, Repository, Kafka)
+- [ ] Presentation Layer (Controller, DTO)
 - [ ] SAGA 패턴 구현 (Transfer Service)
 - [ ] Resilience4j 적용 (Card Service)
 - [ ] 통합 테스트
 - [ ] Docker Compose 전체 구성
+
+---
+
+## 도메인 레이어 구현 현황 (66개 파일)
+
+### 서비스별 도메인 모델
+
+| 서비스 | 파일 수 | Aggregate Root | 주요 VO | 핵심 Enum |
+|--------|---------|----------------|---------|-----------|
+| user-service | 7 | User | UserId, Email, PhoneNumber | UserStatus |
+| auth-server | 12 | AuthUser, RefreshToken, LoginHistory | AuthUserId, Password, RefreshTokenId | UserRole, AuthUserStatus |
+| account-service | 8 | Account | AccountId, AccountNumber, Money | AccountType, AccountStatus |
+| transaction-service | 9 | Transaction, IdempotencyRecord | TransactionId, IdempotencyKey, Money | TransactionType, TransactionStatus |
+| transfer-service | 10 | Transfer, OutboxEvent | TransferId, OutboxEventId, Money | TransferStatus, SagaStatus, OutboxStatus |
+| card-service | 11 | Card, Payment | CardId, CardNumber, PaymentId, Money | CardType, CardStatus, PaymentStatus |
+| ledger-service | 9 | LedgerEntry, AuditLog | LedgerEntryId, AuditLogId, Money | EntryType, TransactionCategory |
+
+### 도메인 모델 상세
+
+#### User Service (7개 파일)
+```
+domain/user/domain/
+├── exception/
+│   ├── UserErrorCode.java          # 에러 코드 (INVALID_EMAIL, USER_NOT_FOUND 등)
+│   └── UserException.java          # 도메인 예외 (팩토리 메서드 패턴)
+└── model/
+    ├── User.java                   # Aggregate Root (회원 정보 관리)
+    ├── UserStatus.java             # 상태 Enum (ACTIVE, INACTIVE, SUSPENDED, WITHDRAWN)
+    └── vo/
+        ├── UserId.java             # USR-xxxxxxxx (8자리 영숫자)
+        ├── Email.java              # 이메일 형식 검증, 정규화
+        └── PhoneNumber.java        # 한국 전화번호 형식 (010-xxxx-xxxx)
+```
+
+#### Auth Server (12개 파일)
+```
+domain/auth/domain/
+├── exception/
+│   ├── AuthErrorCode.java          # 인증 에러 코드
+│   └── AuthException.java          # 인증 예외
+└── model/
+    ├── AuthUser.java               # Aggregate Root (인증 사용자)
+    ├── RefreshToken.java           # Refresh Token 관리
+    ├── LoginHistory.java           # 로그인 이력 (감사 로그)
+    ├── UserRole.java               # 역할 Enum (USER, ADMIN, SYSTEM)
+    ├── AuthUserStatus.java         # 인증 상태 Enum
+    └── vo/
+        ├── AuthUserId.java         # AUTH-xxxxxxxx
+        ├── Email.java              # 이메일 VO
+        ├── Password.java           # BCrypt 해시, 강도 검증
+        ├── RefreshTokenId.java     # RTK-xxxxxxxx
+        └── LoginHistoryId.java     # LHI-xxxxxxxx
+```
+
+#### Account Service (8개 파일)
+```
+domain/account/domain/
+├── exception/
+│   ├── AccountErrorCode.java       # 계좌 에러 코드
+│   └── AccountException.java       # 계좌 예외
+└── model/
+    ├── Account.java                # Aggregate Root (계좌, 낙관적/비관적 락)
+    ├── AccountType.java            # 유형 Enum (CHECKING, SAVINGS, DEPOSIT)
+    ├── AccountStatus.java          # 상태 Enum (ACTIVE, DORMANT, FROZEN, CLOSED)
+    └── vo/
+        ├── AccountId.java          # ACC-xxxxxxxx
+        ├── AccountNumber.java      # 은행코드-상품-일련-검증 (110-xxxx-xxxx-xx)
+        └── Money.java              # BigDecimal 래퍼, 통화 연산
+```
+
+#### Transaction Service (9개 파일)
+```
+domain/transaction/domain/
+├── exception/
+│   ├── TransactionErrorCode.java   # 거래 에러 코드 (멱등성 포함)
+│   └── TransactionException.java   # 거래 예외
+└── model/
+    ├── Transaction.java            # Aggregate Root (입출금 거래)
+    ├── IdempotencyRecord.java      # 멱등성 레코드 (IN_PROGRESS/COMPLETED/FAILED)
+    ├── TransactionType.java        # 유형 Enum (DEPOSIT, WITHDRAWAL, TRANSFER_IN 등)
+    ├── TransactionStatus.java      # 상태 Enum (PENDING, SUCCESS, FAILED, CANCELLED)
+    └── vo/
+        ├── TransactionId.java      # TXN-xxxxxxxx
+        ├── IdempotencyKey.java     # 클라이언트 제공 키 (8~128자, 24시간 TTL)
+        └── Money.java              # 금액 VO
+```
+
+#### Transfer Service (10개 파일)
+```
+domain/transfer/domain/
+├── exception/
+│   ├── TransferErrorCode.java      # 이체 에러 코드 (SAGA 관련)
+│   └── TransferException.java      # 이체 예외
+└── model/
+    ├── Transfer.java               # Aggregate Root (이체, SAGA 상태 관리)
+    ├── OutboxEvent.java            # Outbox 패턴 이벤트 (트랜잭션 원자성)
+    ├── TransferStatus.java         # 상태 Enum (PENDING → COMPLETED/FAILED/CANCELLED)
+    ├── SagaStatus.java             # SAGA 단계 (DEBIT_PENDING → CREDIT_PENDING → COMPLETED)
+    ├── OutboxStatus.java           # Outbox 상태 (PENDING, PUBLISHED, FAILED)
+    └── vo/
+        ├── TransferId.java         # TRF-xxxxxxxx
+        ├── OutboxEventId.java      # OBX-xxxxxxxx
+        └── Money.java              # 금액 VO
+```
+
+#### Card Service (11개 파일)
+```
+domain/card/domain/
+├── exception/
+│   ├── CardErrorCode.java          # 카드 에러 코드 (한도 초과 등)
+│   └── CardException.java          # 카드 예외
+└── model/
+    ├── Card.java                   # Aggregate Root (카드, 한도 관리)
+    ├── Payment.java                # 결제 엔티티 (Card의 하위 엔티티)
+    ├── CardType.java               # 유형 Enum (DEBIT, CREDIT, PREPAID)
+    ├── CardStatus.java             # 상태 Enum (ACTIVE, INACTIVE, EXPIRED, BLOCKED)
+    ├── PaymentStatus.java          # 결제 상태 Enum (PENDING, APPROVED, DECLINED 등)
+    └── vo/
+        ├── CardId.java             # CRD-xxxxxxxx
+        ├── CardNumber.java         # 16자리 카드번호 (마스킹 지원)
+        ├── PaymentId.java          # PAY-xxxxxxxx
+        └── Money.java              # 금액 VO
+```
+
+#### Ledger Service (9개 파일)
+```
+domain/ledger/domain/
+├── exception/
+│   ├── LedgerErrorCode.java        # 원장 에러 코드
+│   └── LedgerException.java        # 원장 예외
+└── model/
+    ├── LedgerEntry.java            # Aggregate Root (원장 기록, Append-only)
+    ├── AuditLog.java               # 감사 로그 (불변)
+    ├── EntryType.java              # 유형 Enum (DEBIT, CREDIT)
+    ├── TransactionCategory.java    # 카테고리 Enum (DEPOSIT, WITHDRAWAL, TRANSFER 등)
+    └── vo/
+        ├── LedgerEntryId.java      # LED-xxxxxxxx
+        ├── AuditLogId.java         # AUD-xxxxxxxx
+        └── Money.java              # 금액 VO
+```
+
+### 도메인 설계 원칙
+
+#### 1. Value Object 패턴
+모든 VO는 `record`로 구현하여 불변성을 보장하고, 생성자에서 자가 검증을 수행합니다.
+
+```java
+public record AccountId(String value) {
+    public static final String PREFIX = "ACC";
+    
+    public AccountId {
+        if (!isValid(value)) {
+            throw AccountException.invalidAccountIdFormat(value);
+        }
+    }
+    
+    public static AccountId generate() {
+        return new AccountId(PREFIX + "-" + UuidUtils.generateShortId());
+    }
+}
+```
+
+#### 2. Aggregate Root 패턴
+Aggregate 내부 상태는 반드시 Root를 통해서만 변경되며, 비즈니스 메서드가 도메인 행위를 캡슐화합니다.
+
+```java
+public class Account {
+    public void withdraw(Money amount) {
+        validateActive();
+        validateSufficientBalance(amount);
+        this.balance = this.balance.subtract(amount);
+    }
+    
+    private void validateSufficientBalance(Money amount) {
+        if (this.balance.isLessThan(amount)) {
+            throw AccountException.insufficientBalance(this.balance, amount);
+        }
+    }
+}
+```
+
+#### 3. Enum 정책 패턴
+상태 Enum이 비즈니스 규칙과 상태 전이 정책을 직접 관리합니다.
+
+```java
+public enum TransferStatus {
+    PENDING("대기중", false),
+    COMPLETED("완료", true),
+    FAILED("실패", true),
+    CANCELLED("취소", true);
+    
+    public boolean canTransitionTo(TransferStatus target) {
+        return switch (this) {
+            case PENDING -> target != PENDING;
+            case COMPLETED, FAILED, CANCELLED -> false;
+        };
+    }
+}
+```
+
+#### 4. Exception 체계
+ErrorCode Enum과 팩토리 메서드 패턴으로 명확하고 일관된 예외 처리를 구현합니다.
+
+```java
+public class UserException extends BusinessException {
+    public static UserException userNotFound(String userId) {
+        return new UserException(
+            UserErrorCode.USER_NOT_FOUND,
+            Map.of("userId", userId)
+        );
+    }
+    
+    public static UserException emailAlreadyExists(String email) {
+        return new UserException(
+            UserErrorCode.EMAIL_ALREADY_EXISTS,
+            Map.of("email", email)
+        );
+    }
+}
+```
 
 ---
 
